@@ -66,11 +66,14 @@ def _attribute(oid: str, value: bytes) -> bytes:
     return der.sequence(der.oid(oid), der.tlv(0x31, value))
 
 
-def tst_info(digest: bytes, nonce: int | None, when: datetime = NOW) -> bytes:
+def tst_info(
+    digest: bytes, nonce: int | None, when: datetime = NOW, imprint_params: bytes | None = None
+) -> bytes:
+    params = der.null() if imprint_params is None else imprint_params
     fields = [
         der.integer(1),
         der.oid("1.2.3.4.1"),
-        der.sequence(der.sequence(der.oid(SHA256), der.null()), der.octet_string(digest)),
+        der.sequence(der.sequence(der.oid(SHA256), params), der.octet_string(digest)),
         der.integer(77),
         der.tlv(der.GENERALIZED_TIME, when.strftime("%Y%m%d%H%M%SZ").encode()),
     ]
@@ -85,7 +88,14 @@ def token(
     *,
     unsorted_attrs: bool = False,
     unsorted_certs: bool = True,
+    signature_params: bytes | None = None,
+    digest_params: bytes | None = None,
+    listed_params: bytes | None = None,
+    stranger: bool = False,
 ) -> bytes:
+    sig_params = der.null() if signature_params is None else signature_params
+    dig_params = der.null() if digest_params is None else digest_params
+    list_params = der.null() if listed_params is None else listed_params
     cert_der = authority.signer.public_bytes(Encoding.DER)
     root_der = authority.root.public_bytes(Encoding.DER)
     ess = der.sequence(
@@ -105,16 +115,18 @@ def token(
     signer_info = der.sequence(
         der.integer(1),
         der.sequence(issuer, der.integer(authority.signer.serial_number)),
-        der.sequence(der.oid(SHA256), der.null()),
+        der.sequence(der.oid(SHA256), dig_params),
         der.tlv(0xA0, body),
-        der.sequence(der.oid("1.2.840.113549.1.1.1"), der.null()),
+        der.sequence(der.oid("1.2.840.113549.1.1.1"), sig_params),
         der.octet_string(signature),
     )
     certs = [cert_der, root_der]
+    if stranger:
+        certs.append(stranger_certificate().public_bytes(Encoding.DER))
     certs = sorted(certs, reverse=True) if unsorted_certs else sorted(certs)
     signed = der.sequence(
         der.integer(3),
-        der.tlv(0x31, der.sequence(der.oid(SHA256), der.null())),
+        der.tlv(0x31, der.sequence(der.oid(SHA256), list_params)),
         der.sequence(
             der.oid("1.2.840.113549.1.9.16.1.4"), der.tlv(0xA0, der.octet_string(content))
         ),
@@ -122,6 +134,20 @@ def token(
         der.tlv(0x31, signer_info),
     )
     return der.sequence(der.oid("1.2.840.113549.1.7.2"), der.tlv(0xA0, signed))
+
+
+def stranger_certificate() -> x509.Certificate:
+    key = _key()
+    return (
+        x509.CertificateBuilder()
+        .subject_name(_name("stranger cross"))
+        .issuer_name(_name("absent ca"))
+        .public_key(key.public_key())
+        .serial_number(9)
+        .not_valid_before(NOW - timedelta(days=1))
+        .not_valid_after(NOW + timedelta(days=30))
+        .sign(_key(), hashes.SHA256())
+    )
 
 
 def response(token_der: bytes, status: int = 0) -> bytes:

@@ -35,6 +35,7 @@ ECDSA_WITH = {
 }
 RSA_ENCRYPTION = "1.2.840.113549.1.1.1"
 MAX_CHAIN = 8
+NAME_VALUE_TYPES = {3, 12, 16, 18, 19, 20, 22, 28, 30}
 FAULTS = (
     ValueError,
     TypeError,
@@ -60,6 +61,15 @@ class TokenInfo:
     nonce: int | None
     accuracy_micros: int | None
     signer: x509.Certificate
+
+
+def _params(alg: tsp.Algorithm, *, null_ok: bool) -> None:
+    params = alg.parameters
+    if params is None:
+        return
+    if null_ok and params.is_(der.NULL) and not params.constructed and not params.content:
+        return
+    raise TimestampError(f"unexpected parameters for algorithm {alg.oid}")
 
 
 def build_request(
@@ -139,7 +149,9 @@ def _check_ess(attrs: dict[str, list[der.Node]], signer: x509.Certificate) -> No
         first = certs[0].children()
         algo = default
         if first[0].is_(der.SEQUENCE):
-            algo = BY_OID.get(tsp.algorithm(first[0]).oid, ("", None))[0]
+            ess_alg = tsp.algorithm(first[0])
+            _params(ess_alg, null_ok=True)
+            algo = BY_OID.get(ess_alg.oid, ("", None))[0]
             first = first[1:]
         if not algo or der.read_octets(first[0]) != _hash(algo, body):
             raise TimestampError("signing certificate attribute does not match the signer")
@@ -157,9 +169,12 @@ def _verify_signature(signed: tsp.SignedData, signer: x509.Certificate) -> None:
     digest_name = BY_OID.get(info.digest_algorithm.oid, ("", None))[0]
     if digest_name not in HASHES:
         raise TimestampError("unsupported digest algorithm")
-    if info.digest_algorithm.oid not in signed.digest_algorithms or any(
-        oid not in BY_OID for oid in signed.digest_algorithms
-    ):
+    _params(info.digest_algorithm, null_ok=True)
+    for listed in signed.digest_algorithms:
+        if listed.oid not in BY_OID:
+            raise TimestampError("SignedData lists an unknown digest algorithm")
+        _params(listed, null_ok=True)
+    if info.digest_algorithm.oid not in {a.oid for a in signed.digest_algorithms}:
         raise TimestampError("SignedData digest algorithms do not cover the signer")
     attrs = tsp.signed_attributes(info)
     kinds = attrs.get(tsp.CONTENT_TYPE, [])
@@ -173,10 +188,12 @@ def _verify_signature(signed: tsp.SignedData, signer: x509.Certificate) -> None:
     algo = info.signature_algorithm.oid
     chosen = HASHES[digest_name][1]()
     if isinstance(key, rsa.RSAPublicKey) and (algo == RSA_ENCRYPTION or algo in RSA_WITH):
+        _params(info.signature_algorithm, null_ok=True)
         if algo in RSA_WITH:
             chosen = HASHES[RSA_WITH[algo]][1]()
         key.verify(info.signature, canonical, padding.PKCS1v15(), chosen)
     elif isinstance(key, ec.EllipticCurvePublicKey) and algo in ECDSA_WITH:
+        _params(info.signature_algorithm, null_ok=False)
         key.verify(info.signature, canonical, ec.ECDSA(HASHES[ECDSA_WITH[algo]][1]()))
     else:
         raise TimestampError("unsupported signature algorithm")
@@ -209,8 +226,8 @@ def _check_name(node: der.Node) -> None:
             if len(parts) != 2:
                 raise TimestampError("bad Name attribute")
             der.read_oid(parts[0])
-            if parts[1].cls != der.UNIVERSAL or parts[1].constructed:
-                raise TimestampError("a Name value is not a universal string")
+            if parts[1].cls != der.UNIVERSAL or parts[1].number not in NAME_VALUE_TYPES:
+                raise TimestampError("a Name value is not a directory string")
 
 
 def _check_structure(raw: bytes) -> None:
@@ -223,6 +240,12 @@ def _check_structure(raw: bytes) -> None:
     offset = 1 if tbs[0].is_(0, der.CONTEXT) else 0
     _check_name(tbs[offset + 2])
     _check_name(tbs[offset + 4])
+    if tbs[offset + 1].raw != parts[1].raw:
+        raise TimestampError("certificate signature algorithms disagree")
+    key_info = tsp.expect(tbs[offset + 5], der.SEQUENCE, "a SubjectPublicKeyInfo").children()
+    for bits in (parts[2], key_info[-1]):
+        if not bits.is_(der.BIT_STRING) or bits.content[:1] != b"\x00":
+            raise TimestampError("a signature or key BIT STRING is not octet aligned")
     for field in tbs[offset + 6 :]:
         if field.is_(3, der.CONTEXT):
             for ext in field.children()[0].children():
@@ -234,6 +257,7 @@ def _check_pool(
 ) -> None:
     for raw, cert in zip(raws, pool, strict=True):
         _check_structure(raw)
+        list(cert.extensions)
         issuers = [c for c in [*roots, *pool] if c.subject == cert.issuer]
         verified = False
         for issuer in issuers:
@@ -315,6 +339,7 @@ def _verify(
     _check_pool(signed.certificates, pool, roots)
     _chain(signer, pool, roots, info.gen_time)
     expected = HASHES.get(hash_alg)
+    _params(info.hash_algorithm, null_ok=True)
     if expected is None or info.hash_algorithm.oid != expected[0] or info.hashed_message != digest:
         raise TimestampError("message imprint does not match the digest")
     if nonce is not None and info.nonce != nonce:

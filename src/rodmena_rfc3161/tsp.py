@@ -38,7 +38,7 @@ class SignedData:
     content: bytes
     certificates: list[bytes]
     signer: SignerInfo
-    digest_algorithms: list[str]
+    digest_algorithms: list[Algorithm]
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +148,7 @@ def signed_data(token: bytes) -> SignedData:
         raise TimestampError("short SignedData")
     der.read_integer(parts[0])
     digests = [
-        algorithm(a).oid for a in expect(parts[1], der.SET, "digest algorithms").children(ber=True)
+        algorithm(a) for a in expect(parts[1], der.SET, "digest algorithms").children(ber=True)
     ]
     encap = expect(parts[2], der.SEQUENCE, "encapsulated content").children(ber=True)
     if len(encap) != 2:

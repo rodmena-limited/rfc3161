@@ -1,0 +1,1 @@
+{"authority": "digicert", "digest": "7f260aa9f14b6fbb314ce2dbb3d717c920648b0e285a14e122ffdac930de74ff", "nonce": 6708155536146905733, "source": "fuzz seed 60601 case 72217: a certificate signature BIT STRING declared one unused bit"}

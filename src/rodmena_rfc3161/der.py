@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .errors import TimestampError
@@ -16,7 +17,12 @@ NULL = 5
 OID = 6
 SEQUENCE = 16
 SET = 17
+ENUMERATED = 10
+RELATIVE_OID = 13
+UTC_TIME = 23
 GENERALIZED_TIME = 24
+UTC_TIME_DER = re.compile(rb"^\d{12}Z$")
+GENERALIZED_TIME_DER = re.compile(rb"^\d{14}(\.\d*[1-9])?Z$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,8 +107,13 @@ def read_one(data: bytes, pos: int = 0, *, ber: bool = False, depth: int = 0) ->
         raise TimestampError("input too large")
     start = pos
     cls, constructed, number, pos = _read_tag(data, pos)
-    if not ber and cls == UNIVERSAL and constructed and number not in (SEQUENCE, SET):
-        raise TimestampError("constructed encoding of a primitive type")
+    if cls == UNIVERSAL:
+        if number == 0:
+            raise TimestampError("end-of-contents used as a value")
+        if number in (SEQUENCE, SET) and not constructed:
+            raise TimestampError("primitive encoding of a constructed type")
+        if not ber and constructed and number not in (SEQUENCE, SET):
+            raise TimestampError("constructed encoding of a primitive type")
     length, pos = _read_length(data, pos, ber)
     header = data[start:pos]
     if length is None:
@@ -114,7 +125,43 @@ def read_one(data: bytes, pos: int = 0, *, ber: bool = False, depth: int = 0) ->
     end = pos + length
     if end > len(data):
         raise TimestampError("length runs past the end")
+    if cls == UNIVERSAL and not constructed:
+        check_primitive(number, data[pos:end], ber)
     return Node(cls, constructed, number, header, data[pos:end], data[start:end], True), end
+
+
+def _check_oid_body(content: bytes) -> None:
+    if not content or content[-1] & 0x80:
+        raise TimestampError("bad OBJECT IDENTIFIER encoding")
+    fresh = True
+    for byte in content:
+        if fresh and byte == 0x80:
+            raise TimestampError("non-minimal OBJECT IDENTIFIER")
+        fresh = not byte & 0x80
+
+
+def check_primitive(number: int, content: bytes, ber: bool) -> None:
+    if number == BOOLEAN:
+        if len(content) != 1 or (not ber and content not in (b"\x00", b"\xff")):
+            raise TimestampError("bad BOOLEAN")
+    elif number in (INTEGER, ENUMERATED):
+        integer_value(content)
+    elif number == NULL:
+        if content:
+            raise TimestampError("NULL with content")
+    elif number in (OID, RELATIVE_OID):
+        _check_oid_body(content)
+    elif number == BIT_STRING:
+        if not content or content[0] > 7 or (len(content) == 1 and content[0]):
+            raise TimestampError("bad BIT STRING")
+        if not ber and content[0] and content[-1] & ((1 << content[0]) - 1):
+            raise TimestampError("BIT STRING unused bits are not zero")
+    elif number == UTC_TIME:
+        if not UTC_TIME_DER.match(content):
+            raise TimestampError("bad UTCTime")
+    elif number == GENERALIZED_TIME:
+        if not GENERALIZED_TIME_DER.match(content):
+            raise TimestampError("bad GeneralizedTime")
 
 
 def read_all(data: bytes, *, ber: bool = False, depth: int = 0) -> list[Node]:
