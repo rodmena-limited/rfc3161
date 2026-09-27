@@ -51,7 +51,15 @@ def main() -> int:
         meta = json.loads(meta_path.read_text())
         reply = meta_path.with_suffix(".tsr").read_bytes()
         name = meta["authority"]
-        for kind, data, digest, ca_name in variants(name, reply, bytes.fromhex(meta["digest"])):
+        digest_bytes = bytes.fromhex(meta["digest"])
+        try:
+            parse_response(reply)
+        except TimestampError:
+            counts[f"{name} not_granted"] += 1
+            if openssl_accepts(reply, digest_bytes, root(name)):
+                disagreements.append(f"{meta_path.name} not granted: ours False, openssl True")
+            continue
+        for kind, data, digest, ca_name in variants(name, reply, digest_bytes):
             ours = _ours(data, digest, ca_name)
             theirs = openssl_accepts(data, digest, root(ca_name))
             counts[f"{name} {kind} {'accept' if ours else 'reject'}"] += 1
