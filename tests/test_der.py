@@ -56,3 +56,15 @@ def test_round_trips() -> None:
         assert der.read_integer(der.parse(der.integer(value))) == value
     for dotted in ("1.2.840.113549.1.9.16.1.4", "2.16.840.1.101.3.4.2.1", "2.999.3"):
         assert der.read_oid(der.parse(der.oid(dotted))) == dotted
+
+
+def test_der_refuses_constructed_primitives_and_constructed_null_parameters() -> None:
+    with pytest.raises(TimestampError, match="constructed"):
+        der.parse(b"\x22\x03\x02\x01\x01")
+    assert der.parse(b"\x24\x03\x04\x01a", ber=True).constructed
+    from rodmena_rfc3161 import tsp
+
+    with pytest.raises(TimestampError, match="constructed|NULL"):
+        tsp.algorithm(
+            der.parse(b"\x30\x0d" + der.oid("1.2.840.113549.1.1.11") + b"\x25\x00", ber=True)
+        )

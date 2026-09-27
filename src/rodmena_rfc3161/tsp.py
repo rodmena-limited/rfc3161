@@ -64,7 +64,7 @@ def algorithm(node: Node) -> Algorithm:
     if not 1 <= len(parts) <= 2:
         raise TimestampError("bad AlgorithmIdentifier")
     params = parts[1] if len(parts) == 2 else None
-    if params is not None and params.is_(der.NULL) and params.content:
+    if params is not None and params.is_(der.NULL) and (params.content or params.constructed):
         raise TimestampError("bad NULL parameters")
     return Algorithm(der.read_oid(parts[0]), params)
 

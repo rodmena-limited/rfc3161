@@ -101,6 +101,8 @@ def read_one(data: bytes, pos: int = 0, *, ber: bool = False, depth: int = 0) ->
         raise TimestampError("input too large")
     start = pos
     cls, constructed, number, pos = _read_tag(data, pos)
+    if not ber and cls == UNIVERSAL and constructed and number not in (SEQUENCE, SET):
+        raise TimestampError("constructed encoding of a primitive type")
     length, pos = _read_length(data, pos, ber)
     header = data[start:pos]
     if length is None:
